@@ -15,6 +15,12 @@ test('serves the UI and forwards bounded TCP reads', async () => {
     assert.match(html, /Modbus/);
     assert.match(html, /ผลสแกนครั้งเดียว/);
     assert.match(html, /ค่าสด/);
+    for (const asset of ['/tokens.css', '/theme.css']) {
+      const stylesheet = await fetch(`${base}${asset}`);
+      assert.equal(stylesheet.status, 200);
+      assert.match(stylesheet.headers.get('content-type'), /text\/css/);
+      assert.match(await stylesheet.text(), /--color-|\.sidebar/);
+    }
     const response = await fetch(`${base}/api/read`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host: '192.168.1.20', port: 502, unitId: 1, functionCode: 3, address: 10, count: 1 }) });
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { values: [77] });

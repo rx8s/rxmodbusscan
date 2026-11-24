@@ -32,10 +32,32 @@ function setTransport(transport) {
   state.transport = transport;
   $('transport-tcp').classList.toggle('active', transport === 'tcp');
   $('transport-rtu').classList.toggle('active', transport === 'rtu');
+  $('transport-tcp').setAttribute('aria-pressed', String(transport === 'tcp'));
+  $('transport-rtu').setAttribute('aria-pressed', String(transport === 'rtu'));
   $('tcp-fields').classList.toggle('hidden', transport !== 'tcp');
   $('rtu-fields').classList.toggle('hidden', transport !== 'rtu');
   status(transport === 'tcp' ? 'พร้อมสแกน TCP' : state.serial ? 'เชื่อมต่อ Serial' : 'รอเลือกพอร์ต Serial');
   saveSettings();
+}
+
+function clearFormErrors() {
+  for (const id of ['connection-error', 'range-error']) {
+    $(id).textContent = '';
+    $(id).classList.add('hidden');
+  }
+  all('[aria-invalid="true"]').forEach(node => node.removeAttribute('aria-invalid'));
+}
+
+function showScanError(message) {
+  clearFormErrors();
+  const range = /ช่วง address|ประเภทข้อมูล|chunk/i.test(message);
+  const target = $(range ? 'range-error' : 'connection-error');
+  target.textContent = message;
+  target.classList.remove('hidden');
+  target.tabIndex = -1;
+  target.focus();
+  const fields = range ? ['start', 'end'] : /Port|Host|IP/i.test(message) ? ['host', 'port'] : /Unit ID/i.test(message) ? [state.transport === 'tcp' ? 'tcp-unit' : 'rtu-unit'] : /Timeout/i.test(message) ? ['timeout'] : [];
+  fields.forEach(id => $(id).setAttribute('aria-invalid', 'true'));
 }
 
 function getSettings() {
@@ -213,7 +235,8 @@ function renderSnapshot() {
     const row = body.insertRow();
     const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = state.selected.has(keyOf(item)); checkbox.setAttribute('aria-label', `ติดตาม ${areaName(item.functionCode)} address ${item.address}`);
     checkbox.addEventListener('change', async () => { if (state.poller?.running) await stopLive(); if (checkbox.checked) state.selected.add(keyOf(item)); else state.selected.delete(keyOf(item)); renderLive(); saveSnapshot(); });
-    row.insertCell().append(checkbox);
+    const checkboxLabel = document.createElement('label'); checkboxLabel.className = 'table-checkbox'; checkboxLabel.append(checkbox);
+    row.insertCell().append(checkboxLabel);
     const badge = document.createElement('span'); badge.className = 'area-badge'; badge.textContent = areaName(item.functionCode); row.insertCell().append(badge);
     const address = row.insertCell(); address.className = 'mono'; address.textContent = item.address;
     const reference = row.insertCell(); reference.className = 'mono muted'; reference.textContent = referenceLabel(item.functionCode, item.address);
@@ -259,7 +282,7 @@ function renderLive() {
     const time = row.insertCell(); time.className = 'muted';
     state.liveCells.set(keyOf(item), { value, hex, status: statusCell, time });
     applyLiveCell(item);
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'page-button'; remove.textContent = '×'; remove.title = 'นำออกจากค่าสด'; remove.onclick = async () => { if (state.poller?.running) await stopLive(); state.selected.delete(keyOf(item)); renderSnapshot(); renderLive(); saveSnapshot(); }; row.insertCell().append(remove);
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'page-button'; remove.textContent = 'นำออก'; remove.setAttribute('aria-label', `นำ ${areaName(item.functionCode)} address ${item.address} ออกจากค่าสด`); remove.onclick = async () => { if (state.poller?.running) await stopLive(); state.selected.delete(keyOf(item)); renderSnapshot(); renderLive(); saveSnapshot(); }; row.insertCell().append(remove);
   }
   if (selected.length > 500) $('live-note').textContent += ' · ตารางแสดง 500 รายการแรก';
 }
@@ -271,13 +294,15 @@ function updateProgress(summary) {
   renderStats();
   $('progress-count').textContent = `${fmt(summary.processed)} / ${fmt(summary.total)}`;
   $('progress-bar').style.width = `${Math.min(100, summary.processed / summary.total * 100)}%`;
+  $('progress-bar').parentElement.setAttribute('aria-valuenow', String(Math.round(summary.processed / summary.total * 100)));
   $('progress-detail').textContent = `${fmt(summary.requests)} คำขอ · อ่านได้ ${fmt(summary.readable)} · ใช้ไม่ได้ ${fmt(summary.invalid)} · ผิดพลาด ${fmt(summary.failed)}`;
 }
 
 async function startScan() {
   if (state.scanning || state.poller?.running) return toast('หยุดค่าสดก่อนเริ่มสแกนใหม่');
   let settings;
-  try { settings = getSettings(); makeRead(settings); } catch (error) { return toast(error.message); }
+  try { settings = getSettings(); makeRead(settings); } catch (error) { return showScanError(error.message); }
+  clearFormErrors();
   state.context = { ...settings, serialPort: settings.transport === 'rtu' ? state.serial?.port : undefined };
   const read = makeRead(settings);
   state.snapshot.clear(); state.selected.clear(); state.failures = []; state.liveValues.clear(); state.page = 1;
@@ -350,6 +375,10 @@ function selectTab(tab) {
   $('live-panel').classList.toggle('hidden', tab !== 'live');
   $('tab-snapshot').classList.toggle('active', tab === 'snapshot');
   $('tab-live').classList.toggle('active', tab === 'live');
+  $('tab-snapshot').setAttribute('aria-selected', String(tab === 'snapshot'));
+  $('tab-live').setAttribute('aria-selected', String(tab === 'live'));
+  $('tab-snapshot').tabIndex = tab === 'snapshot' ? 0 : -1;
+  $('tab-live').tabIndex = tab === 'live' ? 0 : -1;
 }
 
 $('transport-tcp').onclick = () => setTransport('tcp');
@@ -359,6 +388,14 @@ $('start-scan').onclick = startScan;
 $('stop-scan').onclick = () => { state.controller?.abort(); $('progress-label').textContent = 'กำลังหยุด...'; };
 $('tab-snapshot').onclick = () => selectTab('snapshot');
 $('tab-live').onclick = () => selectTab('live');
+for (const tab of ['snapshot', 'live']) $(tab === 'snapshot' ? 'tab-snapshot' : 'tab-live').addEventListener('keydown', event => {
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    event.preventDefault();
+    const next = tab === 'snapshot' ? 'live' : 'snapshot';
+    selectTab(next);
+    $(next === 'snapshot' ? 'tab-snapshot' : 'tab-live').focus();
+  }
+});
 $('start-live').onclick = startLive;
 $('stop-live').onclick = stopLive;
 $('export-csv').onclick = exportCsv;
@@ -367,7 +404,14 @@ $('next-page').onclick = () => { state.page++; renderSnapshot(); };
 $('search').oninput = () => { state.page = 1; scheduleRender(); };
 $('area-filter').onchange = () => { state.page = 1; renderSnapshot(); };
 all('input[name="range-mode"],input[name="area"],#start,#end').forEach(node => node.addEventListener('change', () => { updateEstimate(); saveSettings(); }));
-all('input,select').forEach(node => node.addEventListener('change', saveSettings));
+function refreshFormErrors() {
+  if ($('connection-error').classList.contains('hidden') && $('range-error').classList.contains('hidden')) return;
+  try { getSettings(); clearFormErrors(); } catch { /* keep the error until all settings are valid */ }
+}
+all('input,select').forEach(node => {
+  node.addEventListener('input', refreshFormErrors);
+  node.addEventListener('change', () => { saveSettings(); refreshFormErrors(); });
+});
 all('#baud,#data-bits,#stop-bits,#parity').forEach(node => node.addEventListener('change', async () => {
   if (state.serial && !state.scanning && !state.poller?.running) { await state.serial.close(); state.serial = null; $('choose-port').textContent = 'เลือกพอร์ต USB / Serial'; $('serial-status').textContent = 'ตั้งค่า Serial เปลี่ยนแล้ว · เลือกพอร์ตอีกครั้ง'; }
 }));
