@@ -63,3 +63,30 @@ test('releases busy state when serial write fails', async () => {
   await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 0, count: 1 }), /write failed/);
   assert.equal(client.busy, false);
 });
+
+test('times out a stalled serial write and refuses further reads until reconnect', async () => {
+  const port = {
+    async open() {}, async close() {},
+    writable: { getWriter: () => ({ write: () => new Promise(() => {}), abort: async () => {}, releaseLock() {} }) }
+  };
+  const client = new RtuClient(port);
+  await client.open({ baudRate: 9600 });
+  await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 0, count: 1, timeoutMs: 100 }), /timeout/i);
+  assert.equal(client.busy, false);
+  await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 1, count: 1, timeoutMs: 100 }), /เชื่อมต่อใหม่|reconnect/i);
+  await client.close();
+});
+
+test('does not send another RTU request after partial response timeout', async () => {
+  let writes = 0;
+  const port = {
+    async open() {}, async close() {},
+    readable: { getReader: () => ({ read: () => new Promise(() => {}), cancel: async () => {}, releaseLock() {} }) },
+    writable: { getWriter: () => ({ write: async () => { writes++; }, releaseLock() {} }) }
+  };
+  const client = new RtuClient(port);
+  await client.open({ baudRate: 9600 });
+  await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 0, count: 1, timeoutMs: 100 }), /timeout/i);
+  await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 1, count: 1, timeoutMs: 100 }), /เชื่อมต่อใหม่|reconnect/i);
+  assert.equal(writes, 1);
+});

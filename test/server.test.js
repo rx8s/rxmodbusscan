@@ -32,3 +32,20 @@ test('rejects nonlocal Host headers', async () => {
     assert.equal(status, 403);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
+test('returns 400 for invalid TCP target settings', async () => {
+  const server = createAppServer();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/read`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host: '', port: 0, unitId: 1, functionCode: 3, address: 0, count: 1 }) });
+    assert.equal(response.status, 400);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('returns 400 for a malformed request target without throwing', () => {
+  const server = createAppServer();
+  let status;
+  server.emit('request', { headers: { host: 'localhost' }, url: 'http://[', method: 'GET' }, { writeHead(code) { status = code; }, end() {} });
+  assert.equal(status, 400);
+  server.close();
+});

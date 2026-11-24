@@ -7,7 +7,7 @@ const all = selector => [...document.querySelectorAll(selector)];
 const state = {
   transport: 'tcp', serial: null, snapshot: new Map(), selected: new Set(), failures: [],
   summary: null, scanning: false, controller: null, poller: null, liveValues: new Map(),
-  context: null, page: 1, renderTimer: null
+  liveCells: new Map(), context: null, page: 1, renderTimer: null
 };
 const keyOf = row => `${row.functionCode}:${row.address}`;
 const areaName = code => AREAS.find(area => area.functionCode === code)?.name || `FC${code}`;
@@ -132,12 +132,19 @@ async function restoreSnapshot() {
   } catch { /* browser storage may be disabled */ }
 }
 
+async function closeSerial(message = 'ยังไม่ได้เลือกพอร์ต') {
+  const client = state.serial;
+  state.serial = null;
+  if (client) { try { await client.close(); } catch (error) { toast(error.message); } }
+  $('choose-port').textContent = 'เลือกพอร์ต USB / Serial';
+  $('serial-status').textContent = message;
+}
+
 async function chooseSerialPort() {
   if (state.serial) {
-    await state.serial.close();
-    state.serial = null;
-    $('choose-port').textContent = 'เลือกพอร์ต USB / Serial';
-    $('serial-status').textContent = 'ยังไม่ได้เลือกพอร์ต';
+    if (state.scanning) state.controller?.abort();
+    if (state.poller?.running) await stopLive();
+    await closeSerial();
     status('ตัดการเชื่อมต่อ Serial');
     return;
   }
@@ -154,7 +161,8 @@ async function chooseSerialPort() {
 }
 
 async function readTcpRequest(settings, request) {
-  const response = await fetch('/api/read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host: settings.host, port: settings.port, unitId: settings.unitId, timeoutMs: settings.timeoutMs, ...request }) });
+  const { signal, ...readOptions } = request;
+  const response = await fetch('/api/read', { method: 'POST', headers: { 'content-type': 'application/json' }, signal, body: JSON.stringify({ host: settings.host, port: settings.port, unitId: settings.unitId, timeoutMs: settings.timeoutMs, ...readOptions }) });
   const body = await response.json();
   if (!response.ok) {
     const error = new Error(body.error || 'อ่าน TCP ไม่สำเร็จ');
@@ -204,7 +212,7 @@ function renderSnapshot() {
   for (const item of visible) {
     const row = body.insertRow();
     const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = state.selected.has(keyOf(item)); checkbox.setAttribute('aria-label', `ติดตาม ${areaName(item.functionCode)} address ${item.address}`);
-    checkbox.addEventListener('change', () => { if (checkbox.checked) state.selected.add(keyOf(item)); else state.selected.delete(keyOf(item)); renderLive(); saveSnapshot(); });
+    checkbox.addEventListener('change', async () => { if (state.poller?.running) await stopLive(); if (checkbox.checked) state.selected.add(keyOf(item)); else state.selected.delete(keyOf(item)); renderLive(); saveSnapshot(); });
     row.insertCell().append(checkbox);
     const badge = document.createElement('span'); badge.className = 'area-badge'; badge.textContent = areaName(item.functionCode); row.insertCell().append(badge);
     const address = row.insertCell(); address.className = 'mono'; address.textContent = item.address;
@@ -223,23 +231,35 @@ function renderSnapshot() {
   }
 }
 
+function applyLiveCell(item) {
+  const cells = state.liveCells.get(keyOf(item));
+  if (!cells) return;
+  const live = state.liveValues.get(keyOf(item));
+  cells.value.textContent = live?.value === undefined ? '—' : item.functionCode <= 2 ? (live.value ? 'ON' : 'OFF') : fmt(live.value);
+  cells.hex.textContent = live?.value !== undefined && item.functionCode > 2 ? `0x${live.value.toString(16).toUpperCase().padStart(4, '0')}` : '—';
+  cells.status.className = live?.status === 'failed' ? 'status-failed' : 'status-ok';
+  cells.status.textContent = live?.status === 'failed' ? `ข้อมูลเก่า · ${live.message}` : live && state.poller?.running ? 'ปกติ' : live ? 'ข้อมูลเก่า · หยุดอ่าน' : 'รออ่าน';
+  cells.time.textContent = clock(live?.time);
+}
+
 function renderLive() {
   const selected = [...state.selected].map(key => state.snapshot.get(key)).filter(Boolean);
   $('live-tab-count').textContent = fmt(selected.length);
   $('live-note').textContent = state.poller?.running ? `กำลังอ่านซ้ำ ${fmt(selected.length)} address` : selected.length ? `เลือกแล้ว ${fmt(selected.length)} address · กดเริ่มอ่านค่าสด` : 'ยังไม่ได้เลือก address · เลือกช่อง LIVE ในหมวดผลสแกนครั้งเดียว';
-  const body = $('live-body'); body.replaceChildren();
+  const body = $('live-body'); body.replaceChildren(); state.liveCells.clear();
   if (!selected.length) { const row = body.insertRow(); const cell = row.insertCell(); cell.colSpan = 8; cell.className = 'empty-cell'; cell.textContent = 'ยังไม่มี address ที่เลือก'; }
   for (const item of selected.slice(0, 500)) {
-    const live = state.liveValues.get(keyOf(item));
     const row = body.insertRow();
     row.insertCell().textContent = areaName(item.functionCode);
     row.insertCell().textContent = item.address;
     row.insertCell().textContent = referenceLabel(item.functionCode, item.address);
-    const value = row.insertCell(); value.className = 'value'; value.textContent = live?.status === 'ok' ? (item.functionCode <= 2 ? (live.value ? 'ON' : 'OFF') : fmt(live.value)) : '—';
-    row.insertCell().textContent = live?.status === 'ok' && item.functionCode > 2 ? `0x${live.value.toString(16).toUpperCase().padStart(4, '0')}` : '—';
-    const statusCell = row.insertCell(); statusCell.className = live?.status === 'failed' ? 'status-failed' : 'status-ok'; statusCell.textContent = live?.status === 'failed' ? live.message : live ? 'ปกติ' : 'รออ่าน';
-    row.insertCell().textContent = clock(live?.time);
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'page-button'; remove.textContent = '×'; remove.title = 'นำออกจากค่าสด'; remove.onclick = () => { if (state.poller?.running) stopLive(); state.selected.delete(keyOf(item)); renderSnapshot(); renderLive(); saveSnapshot(); }; row.insertCell().append(remove);
+    const value = row.insertCell(); value.className = 'value';
+    const hex = row.insertCell(); hex.className = 'mono muted';
+    const statusCell = row.insertCell();
+    const time = row.insertCell(); time.className = 'muted';
+    state.liveCells.set(keyOf(item), { value, hex, status: statusCell, time });
+    applyLiveCell(item);
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'page-button'; remove.textContent = '×'; remove.title = 'นำออกจากค่าสด'; remove.onclick = async () => { if (state.poller?.running) await stopLive(); state.selected.delete(keyOf(item)); renderSnapshot(); renderLive(); saveSnapshot(); }; row.insertCell().append(remove);
   }
   if (selected.length > 500) $('live-note').textContent += ' · ตารางแสดง 500 รายการแรก';
 }
@@ -266,17 +286,22 @@ async function startScan() {
   $('start-scan').classList.add('hidden'); $('stop-scan').classList.remove('hidden'); $('progress-box').classList.remove('hidden');
   $('progress-label').textContent = 'กำลังสแกน';
   status('กำลังสแกน'); renderAll(); saveSettings();
+  let disconnectSerial = false;
   try {
     const summary = await scan({ read, areas: settings.areas, start: settings.start, end: settings.end, signal: state.controller.signal,
       onProgress: updateProgress,
       onResult: result => { if (result.status === 'ok') state.snapshot.set(keyOf(result), result); else if (state.failures.length < 500) state.failures.push(result); scheduleRender(); }
     });
     updateProgress(summary);
-    $('progress-label').textContent = summary.cancelled ? 'หยุดสแกนแล้ว' : 'สแกนเสร็จ';
-    status(summary.cancelled ? 'หยุดสแกนแล้ว' : 'สแกนเสร็จ');
+    disconnectSerial = settings.transport === 'rtu' && (summary.cancelled || summary.stopped);
+    $('progress-label').textContent = summary.cancelled ? 'หยุดสแกนแล้ว' : summary.stopped ? 'หยุดเพราะการเชื่อมต่อผิดพลาด' : 'สแกนเสร็จ';
+    status(summary.cancelled ? 'หยุดสแกนแล้ว' : summary.stopped ? 'การเชื่อมต่อผิดพลาด' : 'สแกนเสร็จ', summary.stopped);
     await saveSnapshot();
-  } catch (error) { status('สแกนผิดพลาด', true); toast(error.message); }
-  finally { state.scanning = false; state.controller = null; $('start-scan').classList.remove('hidden'); $('stop-scan').classList.add('hidden'); renderAll(); }
+  } catch (error) { disconnectSerial = settings.transport === 'rtu'; status('สแกนผิดพลาด', true); toast(error.message); }
+  finally {
+    if (disconnectSerial && state.serial) await closeSerial('ต้องเลือกพอร์ตใหม่');
+    state.scanning = false; state.controller = null; $('start-scan').classList.remove('hidden'); $('stop-scan').classList.add('hidden'); renderAll();
+  }
 }
 
 function startLive() {
@@ -290,16 +315,23 @@ function startLive() {
   try { read = makeRead(state.context); } catch (error) { return toast(error.message); }
   const interval = Number($('live-interval').value);
   state.poller = createLivePoller({ read,
-    onUpdate: row => { state.liveValues.set(keyOf(row), row); renderLive(); },
-    onError: row => { state.liveValues.set(keyOf(row), row); renderLive(); }
+    onUpdate: row => { state.liveValues.set(keyOf(row), row); applyLiveCell(row); },
+    onError: row => { const last = state.liveValues.get(keyOf(row)); state.liveValues.set(keyOf(row), { ...row, value: last?.value, time: last?.time }); applyLiveCell(row); },
+    onStopped: error => {
+      $('start-live').classList.remove('hidden'); $('stop-live').classList.add('hidden');
+      status('การเชื่อมต่อค่าสดผิดพลาด', true); toast(error.message); renderLive();
+      if (state.context?.transport === 'rtu') closeSerial('ต้องเลือกพอร์ตใหม่');
+    }
   });
   try { state.poller.start(items, interval); } catch (error) { return toast(error.message); }
   $('start-live').classList.add('hidden'); $('stop-live').classList.remove('hidden');
   status('กำลังอ่านค่าสด'); renderLive(); saveSettings();
 }
 
-function stopLive() {
-  state.poller?.stop();
+async function stopLive() {
+  $('stop-live').disabled = true;
+  try { await state.poller?.stop(); } finally { $('stop-live').disabled = false; }
+  if (state.context?.transport === 'rtu' && state.serial?.desynced) await closeSerial('ต้องเลือกพอร์ตใหม่');
   $('start-live').classList.remove('hidden'); $('stop-live').classList.add('hidden');
   status('หยุดค่าสดแล้ว'); renderLive();
 }

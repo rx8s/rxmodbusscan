@@ -55,38 +55,63 @@ export class RtuClient {
     this.opened = false;
     this.busy = false;
     this.reader = null;
+    this.writer = null;
+    this.activeController = null;
+    this.desynced = false;
   }
 
   async open(settings) {
     if (this.opened) return;
     await this.port.open(settings);
     this.opened = true;
+    this.desynced = false;
   }
 
   async read(options) {
     if (!this.opened) throw new RtuError('ยังไม่ได้เชื่อมต่อ Serial', 'transport');
+    if (this.desynced) {
+      const error = new RtuError('RTU ไม่ตรงเฟรม ต้องเชื่อมต่อใหม่ก่อนอ่านต่อ', 'transport');
+      error.terminal = true;
+      throw error;
+    }
     if (this.busy) throw new RtuError('มีคำขอที่ยังไม่เสร็จ', 'transport');
     const request = buildRtuRequest(options);
     const timeoutMs = options.timeoutMs ?? 1500;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) throw new RtuError('Timeout ต้องอยู่ระหว่าง 100–30000 ms', 'input');
     this.busy = true;
+    const controller = new AbortController();
+    this.activeController = controller;
+    const externalAbort = () => controller.abort();
+    options.signal?.addEventListener('abort', externalAbort, { once: true });
+    if (options.signal?.aborted) controller.abort();
     const deadline = Date.now() + timeoutMs;
     let bytes = [];
     let reader;
     let frameComplete = false;
+    let failure;
+    const guarded = async operation => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new RtuError('RTU timeout', 'transport');
+      let timer;
+      let onAbort;
+      try {
+        return await Promise.race([
+          operation,
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new RtuError('RTU timeout', 'transport')), remaining); }),
+          new Promise((_, reject) => { onAbort = () => reject(new RtuError('RTU cancelled', 'cancelled')); controller.signal.addEventListener('abort', onAbort, { once: true }); if (controller.signal.aborted) onAbort(); })
+        ]);
+      } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', onAbort); }
+    };
     try {
       const writer = this.port.writable.getWriter();
-      try { await writer.write(request); } finally { writer.releaseLock(); }
+      this.writer = writer;
+      await guarded(writer.write(request));
+      writer.releaseLock();
+      this.writer = null;
       reader = this.port.readable.getReader();
       this.reader = reader;
       while (true) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) throw new RtuError('RTU timeout', 'transport');
-        let timer;
-        const chunk = await Promise.race([
-          reader.read(),
-          new Promise((_, reject) => { timer = setTimeout(() => reject(new RtuError('RTU timeout', 'transport')), remaining); })
-        ]).finally(() => clearTimeout(timer));
+        const chunk = await guarded(reader.read());
         if (chunk.done) throw new RtuError('Serial ถูกตัดการเชื่อมต่อ', 'transport');
         bytes.push(...chunk.value);
         if (bytes.length > 260) throw new RtuError('RTU response ยาวเกินไป');
@@ -99,19 +124,41 @@ export class RtuClient {
           }
         }
       }
+    } catch (error) {
+      failure = error;
+      if (error?.kind !== 'exception') {
+        this.desynced = true;
+        error.terminal = true;
+      }
+      throw error;
     } finally {
-      if (reader && !frameComplete) await reader.cancel().catch(() => {});
-      reader?.releaseLock();
+      if (reader && !frameComplete) reader.cancel().catch(() => {});
+      try { reader?.releaseLock(); } catch { /* a pending read may still hold the lock */ }
+      if (this.writer) {
+        if (failure) this.writer.abort?.().catch(() => {});
+        try { this.writer.releaseLock(); } catch { /* pending write */ }
+      }
+      this.writer = null;
       this.reader = null;
+      this.activeController = null;
+      options.signal?.removeEventListener('abort', externalAbort);
       this.busy = false;
     }
   }
 
   async close() {
     if (!this.opened) return;
-    if (this.reader) await this.reader.cancel().catch(() => {});
-    while (this.busy) await new Promise(resolve => setTimeout(resolve, 10));
-    await this.port.close();
-    this.opened = false;
+    this.activeController?.abort();
+    if (this.reader) this.reader.cancel().catch(() => {});
+    if (this.writer) this.writer.abort?.().catch(() => {});
+    const limit = async promise => {
+      let timer;
+      try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new RtuError('ปิด Serial ไม่สำเร็จภายในเวลาที่กำหนด', 'transport')), 700); })]); }
+      finally { clearTimeout(timer); }
+    };
+    try {
+      await limit((async () => { while (this.busy) await new Promise(resolve => setTimeout(resolve, 10)); })());
+      await limit(this.port.close());
+    } finally { this.opened = false; this.desynced = true; }
   }
 }

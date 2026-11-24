@@ -31,13 +31,29 @@ test('skips remaining area after unsupported function', async () => {
   assert.equal(summary.processed, 65536);
 });
 
+test('reports only the unprocessed suffix when an area becomes unsupported', async () => {
+  const failures = [];
+  const summary = await scan({ read: async ({ address, count }) => { if (address >= 2) throw { kind: 'exception', exceptionCode: 1 }; return Array(count).fill(1); }, areas: [1], start: 0, end: 5, chunkSize: 2, onResult: row => { if (row.status !== 'ok') failures.push(row); } });
+  assert.equal(summary.readable, 2);
+  assert.equal(summary.unsupported, 4);
+  assert.deepEqual([failures[0].address, failures[0].count], [2, 4]);
+});
+
 test('stops between read requests when cancelled', async () => {
   const controller = new AbortController();
   let calls = 0;
   const summary = await scan({ read: async ({ count }) => { calls++; controller.abort(); return Array(count).fill(1); }, areas: [4], start: 0, end: 10, chunkSize: 2, signal: controller.signal });
   assert.equal(calls, 1);
   assert.equal(summary.cancelled, true);
-  assert.equal(summary.processed, 2);
+  assert.equal(summary.processed, 0);
+});
+
+test('stops scanning after a terminal transport error', async () => {
+  let calls = 0;
+  const summary = await scan({ read: async () => { calls++; const error = new Error('serial out of sync'); error.terminal = true; throw error; }, areas: [3], start: 0, end: 100, chunkSize: 2 });
+  assert.equal(calls, 1);
+  assert.equal(summary.stopped, true);
+  assert.equal(summary.failed, 2);
 });
 
 test('uses 0–65535 for full scan mode', async () => {

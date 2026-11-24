@@ -4,7 +4,7 @@ import { ModbusError, parseTcpResponse, validateRead } from './protocol.js';
 let nextTransactionId = 0;
 
 export async function readTcp(options) {
-  const { host, port, unitId, functionCode, address, count, timeoutMs = 1500 } = options;
+  const { host, port, unitId, functionCode, address, count, timeoutMs = 1500, signal } = options;
   validateRead(options);
   if (typeof host !== 'string' || !host.trim() || host.length > 253) throw new ModbusError('host is required', 'input');
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new ModbusError('port must be 1–65535', 'input');
@@ -21,13 +21,18 @@ export async function readTcp(options) {
     const socket = net.createConnection({ host, port });
     let received = Buffer.alloc(0);
     let settled = false;
+    const timer = setTimeout(() => finish(new ModbusError('TCP timeout', 'transport')), timeoutMs);
+    const abort = () => finish(new ModbusError('TCP cancelled', 'cancelled'));
+    signal?.addEventListener('abort', abort, { once: true });
     const finish = (error, values) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       socket.destroy();
       if (error) reject(error); else resolve(values);
     };
-    socket.setTimeout(timeoutMs, () => finish(new ModbusError('TCP timeout', 'transport')));
+    if (signal?.aborted) return abort();
     socket.on('error', error => finish(new ModbusError(error.message, 'transport')));
     socket.on('connect', () => socket.write(request));
     socket.on('data', chunk => {

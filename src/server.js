@@ -27,7 +27,9 @@ export function createAppServer({ read = readTcp } = {}) {
     const hostname = host.replace(/:\d+$/, '').toLowerCase();
     if (!['localhost', '127.0.0.1'].includes(hostname)) return json(res, 403, { error: 'Localhost only' });
     if (req.headers.origin && req.headers.origin !== `http://${host}`) return json(res, 403, { error: 'Origin mismatch' });
-    const pathname = new URL(req.url, 'http://localhost').pathname;
+    let pathname;
+    try { pathname = new URL(req.url, 'http://localhost').pathname; }
+    catch { return json(res, 400, { error: 'Invalid request URL' }); }
     if (pathname === '/api/read' && req.method === 'POST') {
       if (req.headers['content-type']?.split(';')[0] !== 'application/json') return json(res, 415, { error: 'JSON required' });
       let text = '';
@@ -38,8 +40,12 @@ export function createAppServer({ read = readTcp } = {}) {
         }
         const body = JSON.parse(text);
         validateRead(body);
-        if (typeof body.host !== 'string' || !body.host.trim() || !Number.isInteger(body.port) || body.port < 1 || body.port > 65535) throw new Error('Host หรือ Port ไม่ถูกต้อง');
-        const values = await read(body);
+        if (typeof body.host !== 'string' || !body.host.trim() || !Number.isInteger(body.port) || body.port < 1 || body.port > 65535) {
+          const error = new Error('Host หรือ Port ไม่ถูกต้อง'); error.kind = 'input'; throw error;
+        }
+        const controller = new AbortController();
+        res.once('close', () => controller.abort());
+        const values = await read({ ...body, signal: controller.signal });
         return json(res, 200, { values });
       } catch (error) {
         return json(res, error.kind === 'input' || error instanceof SyntaxError ? 400 : 502, { error: error.message, kind: error.kind || 'transport', exceptionCode: error.exceptionCode });
