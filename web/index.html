@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modbus Scan · Local Studio</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">M<span>↗</span></div><div><strong>MODBUS SCAN</strong><small>LOCAL STUDIO</small></div></div>
+      <div class="side-scroll">
+        <div class="section-title"><span>01</span> การเชื่อมต่อ</div>
+        <div class="switcher" role="group" aria-label="ประเภทการเชื่อมต่อ">
+          <button id="transport-tcp" class="active" type="button">TCP / LAN</button>
+          <button id="transport-rtu" type="button">USB / Serial</button>
+        </div>
+        <div id="tcp-fields" class="field-group">
+          <label>IP หรือ Host <input id="host" type="text" value="192.168.1.10" spellcheck="false" placeholder="192.168.1.10"></label>
+          <div class="field-row"><label>Port <input id="port" type="number" min="1" max="65535" value="502"></label><label>Unit ID <input id="tcp-unit" type="number" min="0" max="247" value="1"></label></div>
+          <p class="hint">เชื่อมต่อจากเครื่องนี้ไปยังอุปกรณ์ใน LAN</p>
+        </div>
+        <div id="rtu-fields" class="field-group hidden">
+          <button id="choose-port" class="outline full" type="button">เลือกพอร์ต USB / Serial</button>
+          <div id="serial-status" class="port-status">ยังไม่ได้เลือกพอร์ต</div>
+          <div class="field-row"><label>Baud rate <select id="baud"><option>9600</option><option>19200</option><option>38400</option><option>57600</option><option>115200</option><option>4800</option><option>2400</option></select></label><label>Unit ID <input id="rtu-unit" type="number" min="1" max="247" value="1"></label></div>
+          <div class="field-row"><label>Data bits <select id="data-bits"><option>8</option><option>7</option></select></label><label>Stop bits <select id="stop-bits"><option>1</option><option>2</option></select></label></div>
+          <label>Parity <select id="parity"><option value="none">None</option><option value="even">Even</option><option value="odd">Odd</option></select></label>
+          <p class="hint">ใช้ Chrome หรือเบราว์เซอร์ที่รองรับ Web Serial บน localhost</p>
+        </div>
+        <label class="top-gap">Timeout ต่อคำขอ (ms) <input id="timeout" type="number" min="100" max="30000" step="100" value="1500"></label>
+
+        <div class="divider"></div>
+        <div class="section-title"><span>02</span> ขอบเขตการสแกน</div>
+        <div class="mode-list" role="group" aria-label="ขอบเขต address">
+          <label><input type="radio" name="range-mode" value="range" checked><span><strong>กำหนดช่วงเอง</strong><small>เลือก address เริ่มต้นและสิ้นสุด</small></span></label>
+          <label><input type="radio" name="range-mode" value="all"><span><strong>สแกนทั้งหมด</strong><small>0–65535 ของประเภทที่เลือก</small></span></label>
+        </div>
+        <div id="range-fields" class="field-row"><label>เริ่มต้น <input id="start" type="number" min="0" max="65535" value="0"></label><label>สิ้นสุด <input id="end" type="number" min="0" max="65535" value="99"></label></div>
+        <div class="subhead">ประเภทข้อมูล</div>
+        <div class="area-list">
+          <label><input type="checkbox" name="area" value="1" checked><span class="area-dot coil"></span>Coils <small>FC01</small></label>
+          <label><input type="checkbox" name="area" value="2" checked><span class="area-dot input"></span>Discrete inputs <small>FC02</small></label>
+          <label><input type="checkbox" name="area" value="3" checked><span class="area-dot holding"></span>Holding registers <small>FC03</small></label>
+          <label><input type="checkbox" name="area" value="4" checked><span class="area-dot register"></span>Input registers <small>FC04</small></label>
+        </div>
+        <div id="scan-estimate" class="estimate"></div>
+      </div>
+      <div class="sidebar-actions"><button id="start-scan" class="primary full" type="button">เริ่มสแกน <span>↗</span></button><button id="stop-scan" class="danger full hidden" type="button">หยุดสแกน</button></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar"><div><span class="eyebrow">LOCAL DEVICE EXPLORER</span><h1>สำรวจข้อมูล Modbus</h1><p>ค้นหา address ที่อ่านได้ และติดตามค่าจากอุปกรณ์ของคุณ</p></div><div id="connection-pill" class="connection-pill"><span></span>พร้อมเริ่มต้น</div></header>
+      <div class="content">
+        <nav class="tabs" aria-label="หมวดผลลัพธ์"><button id="tab-snapshot" class="active" type="button">ผลสแกนครั้งเดียว <span id="snapshot-tab-count">0</span></button><button id="tab-live" type="button">ค่าสด <span id="live-tab-count">0</span></button></nav>
+
+        <section id="snapshot-panel" class="panel">
+          <div class="panel-heading"><div><h2>ผลสแกนครั้งเดียว</h2><p>ค่าจะคงอยู่จนกว่าจะเริ่มสแกนครั้งใหม่</p></div><button id="export-csv" class="outline" type="button" disabled>↓ ส่งออก CSV</button></div>
+          <div class="stats"><div class="stat"><small>อ่านได้</small><strong id="stat-readable">0</strong></div><div class="stat"><small>Address ใช้ไม่ได้</small><strong id="stat-invalid">0</strong></div><div class="stat"><small>ไม่รองรับ</small><strong id="stat-unsupported">0</strong></div><div class="stat"><small>สื่อสารผิดพลาด</small><strong id="stat-failed">0</strong></div></div>
+          <div id="progress-box" class="progress-box hidden"><div class="progress-head"><strong id="progress-label">กำลังสแกน</strong><span id="progress-count">0 / 0</span></div><div class="progress-track"><div id="progress-bar"></div></div><p id="progress-detail"></p></div>
+          <div class="table-tools"><label class="search-wrap"><span>⌕</span><input id="search" type="search" placeholder="ค้นหา address หรือค่า..."></label><select id="area-filter" aria-label="กรองประเภทข้อมูล"><option value="all">ทุกประเภท</option><option value="1">Coils</option><option value="2">Discrete inputs</option><option value="3">Holding registers</option><option value="4">Input registers</option></select><span id="result-count" class="result-count">0 รายการ</span></div>
+          <div class="table-wrap"><table><thead><tr><th>LIVE</th><th>ประเภท</th><th>Address</th><th>Reference</th><th>ค่าดิบ</th><th>Hex</th><th>อ่านล่าสุด</th></tr></thead><tbody id="snapshot-body"><tr><td colspan="7" class="empty-cell">ยังไม่มีผลสแกน · ตั้งค่าด้านซ้ายแล้วกดเริ่มสแกน</td></tr></tbody></table></div>
+          <div class="table-footer"><span id="page-label">หน้า 0 / 0</span><div><button id="prev-page" class="page-button" type="button">← ก่อนหน้า</button><button id="next-page" class="page-button" type="button">ถัดไป →</button></div></div>
+          <details id="failure-details" class="failures"><summary>รายละเอียด address ที่อ่านไม่ได้ <span id="failure-count">0</span></summary><div id="failure-list"></div></details>
+        </section>
+
+        <section id="live-panel" class="panel hidden">
+          <div class="panel-heading"><div><h2>ค่าสด</h2><p>เลือก address จากตารางผลสแกน แล้วอ่านซ้ำอัตโนมัติ</p></div><div class="live-controls"><label>ทุก <input id="live-interval" type="number" min="500" max="60000" step="500" value="2000"> ms</label><button id="start-live" class="primary" type="button">เริ่มอ่านค่าสด</button><button id="stop-live" class="danger hidden" type="button">หยุด</button></div></div>
+          <div id="live-note" class="notice">ยังไม่ได้เลือก address · เลือกช่อง LIVE ในหมวดผลสแกนครั้งเดียว</div>
+          <div class="table-wrap"><table><thead><tr><th>ประเภท</th><th>Address</th><th>Reference</th><th>ค่า</th><th>Hex</th><th>สถานะ</th><th>อ่านล่าสุด</th><th></th></tr></thead><tbody id="live-body"><tr><td colspan="8" class="empty-cell">ยังไม่มี address ที่เลือก</td></tr></tbody></table></div>
+        </section>
+        <footer>READ ONLY · MODBUS TCP / RTU · ทำงานบนเครื่องนี้</footer>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
