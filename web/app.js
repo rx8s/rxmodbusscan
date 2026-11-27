@@ -7,7 +7,7 @@ const all = selector => [...document.querySelectorAll(selector)];
 const state = {
   transport: 'tcp', serial: null, snapshot: new Map(), selected: new Set(), failures: [],
   summary: null, scanning: false, controller: null, poller: null, liveValues: new Map(),
-  liveCells: new Map(), context: null, scanId: null, selectionWrites: Promise.resolve(), liveWrites: Promise.resolve(), saveErrorShown: false, page: 1, renderTimer: null
+  liveCells: new Map(), context: null, scanId: null, selectionWrites: Promise.resolve(), liveWrites: Promise.resolve(), liveBuffer: [], liveBufferScanId: null, liveFlushTimer: null, saveErrorShown: false, page: 1, renderTimer: null
 };
 const keyOf = row => `${row.functionCode}:${row.address}`;
 const areaName = code => AREAS.find(area => area.functionCode === code)?.name || `FC${code}`;
@@ -152,13 +152,36 @@ function saveSelection() {
   return state.selectionWrites;
 }
 
+const LIVE_BATCH_SIZE = 200;
+const LIVE_FLUSH_MS = 1000;
+
+// Live samples are buffered and written in batches so SQLite commits once per batch, not per value.
 function saveLiveSample(row) {
   if (!state.scanId) return;
-  const scanId = state.scanId;
-  state.liveWrites = state.liveWrites.then(async () => {
-    const response = await fetch(`/api/scans/${scanId}/live`, { method: 'POST', headers: { 'content-type': 'application/json' }, keepalive: true, body: JSON.stringify(row) });
+  if (state.liveBufferScanId !== state.scanId) flushLiveSamples();
+  state.liveBufferScanId = state.scanId;
+  const sample = { functionCode: row.functionCode, address: row.address, status: row.status, time: row.time };
+  if (row.status === 'ok') sample.value = row.value;
+  if (row.message) sample.message = String(row.message).slice(0, 1000);
+  state.liveBuffer.push(sample);
+  if (state.liveBuffer.length >= LIVE_BATCH_SIZE) flushLiveSamples();
+  else state.liveFlushTimer ??= setTimeout(flushLiveSamples, LIVE_FLUSH_MS);
+}
+
+function flushLiveSamples(unloading = false) {
+  clearTimeout(state.liveFlushTimer);
+  state.liveFlushTimer = null;
+  if (!state.liveBuffer.length) return state.liveWrites;
+  const scanId = state.liveBufferScanId;
+  const samples = state.liveBuffer;
+  state.liveBuffer = [];
+  const send = async () => {
+    // keepalive lets the last batch survive page unload, but caps the body at 64 KB, so use it only then.
+    const response = await fetch(`/api/scans/${scanId}/live`, { method: 'POST', headers: { 'content-type': 'application/json' }, keepalive: unloading, body: JSON.stringify({ samples }) });
     if (!response.ok) throw new Error('บันทึกประวัติค่าสดไม่สำเร็จ');
-  }).catch(error => { if (!state.saveErrorShown) toast(error.message); state.saveErrorShown = true; });
+  };
+  state.liveWrites = (unloading ? send() : state.liveWrites.then(send)).catch(error => { if (!state.saveErrorShown) toast(error.message); state.saveErrorShown = true; });
+  return state.liveWrites;
 }
 
 async function loadLegacySnapshot() {
@@ -396,7 +419,7 @@ function startLive() {
 
 async function stopLive() {
   $('stop-live').disabled = true;
-  try { await state.poller?.stop(); await state.liveWrites; } finally { $('stop-live').disabled = false; }
+  try { await state.poller?.stop(); await flushLiveSamples(); } finally { $('stop-live').disabled = false; }
   if (state.context?.transport === 'rtu' && state.serial?.desynced) await closeSerial('ต้องเลือกพอร์ตใหม่');
   $('start-live').classList.remove('hidden'); $('stop-live').classList.add('hidden');
   status('หยุดค่าสดแล้ว'); renderLive();
@@ -456,5 +479,5 @@ all('input,select').forEach(node => {
 all('#baud,#data-bits,#stop-bits,#parity').forEach(node => node.addEventListener('change', async () => {
   if (state.serial && !state.scanning && !state.poller?.running) { await state.serial.close(); state.serial = null; $('choose-port').textContent = 'เลือกพอร์ต USB / Serial'; $('serial-status').textContent = 'ตั้งค่า Serial เปลี่ยนแล้ว · เลือกพอร์ตอีกครั้ง'; }
 }));
-window.addEventListener('beforeunload', () => { state.poller?.stop(); state.controller?.abort(); });
+window.addEventListener('beforeunload', () => { state.poller?.stop(); state.controller?.abort(); flushLiveSamples(true); });
 restoreSettings(); updateEstimate(); renderAll(); restoreSnapshot();
