@@ -47,3 +47,7 @@ npm test
 ```
 
 ชุดทดสอบใช้ Modbus TCP จำลองบน loopback, RTU stream จำลอง และทดสอบกลไกสแกน/อ่านค่าสด การทดสอบกับ USB/Serial และอุปกรณ์จริงต้องมีฮาร์ดแวร์ที่ตั้งค่าตรงกัน
+
+## License
+
+[MIT](LICENSE)
