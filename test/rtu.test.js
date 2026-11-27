@@ -90,3 +90,81 @@ test('does not send another RTU request after partial response timeout', async (
   await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 1, count: 1, timeoutMs: 100 }), /เชื่อมต่อใหม่|reconnect/i);
   assert.equal(writes, 1);
 });
+
+function frameWithCrc(bytes) {
+  const crc = crc16(Uint8Array.from(bytes));
+  return Uint8Array.from([...bytes, crc & 255, crc >> 8]);
+}
+
+function fakePort(responses, written = []) {
+  return {
+    async open() {}, async close() {},
+    readable: { getReader: () => ({ read: async () => (responses.length ? { value: responses.shift() } : new Promise(() => {})), cancel: async () => {}, releaseLock() {} }) },
+    writable: { getWriter: () => ({ write: async bytes => { written.push([...bytes]); }, releaseLock() {} }) }
+  };
+}
+
+test('reads several registers in one request, as grouped live polling does', async () => {
+  const written = [];
+  const client = new RtuClient(fakePort([frameWithCrc([5, 4, 6, 0, 1, 0, 2, 0xff, 0xff])], written));
+  await client.open({ baudRate: 9600 });
+  assert.deepEqual(await client.read({ unitId: 5, functionCode: 4, address: 10, count: 3, timeoutMs: 1000 }), [1, 2, 0xffff]);
+  assert.deepEqual(written[0].slice(0, 6), [5, 4, 0, 10, 0, 3]);
+  await client.close();
+});
+
+test('decodes coil bits least-significant bit first across bytes', async () => {
+  const client = new RtuClient(fakePort([frameWithCrc([1, 1, 2, 0b00000101, 0b00000001])]));
+  await client.open({ baudRate: 9600 });
+  assert.deepEqual(await client.read({ unitId: 1, functionCode: 1, address: 0, count: 9, timeoutMs: 1000 }), [1, 0, 1, 0, 0, 0, 0, 0, 1]);
+  await client.close();
+});
+
+test('two consecutive reads share the open port', async () => {
+  const client = new RtuClient(fakePort([frameWithCrc([1, 3, 2, 0, 7]), frameWithCrc([1, 3, 2, 0, 8])]));
+  await client.open({ baudRate: 9600 });
+  assert.deepEqual(await client.read({ unitId: 1, functionCode: 3, address: 0, count: 1, timeoutMs: 1000 }), [7]);
+  assert.deepEqual(await client.read({ unitId: 1, functionCode: 3, address: 1, count: 1, timeoutMs: 1000 }), [8]);
+  await client.close();
+});
+
+test('rejects trailing bytes after a frame and requires reconnect', async () => {
+  const frame = frameWithCrc([1, 3, 2, 0, 7]);
+  const client = new RtuClient(fakePort([Uint8Array.from([...frame, 0x99])]));
+  await client.open({ baudRate: 9600 });
+  await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 0, count: 1, timeoutMs: 1000 }), error => error.terminal === true);
+  assert.equal(client.desynced, true);
+  await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 0, count: 1, timeoutMs: 1000 }), /เชื่อมต่อใหม่/);
+});
+
+test('rejects a reply from a different unit ID', async () => {
+  const client = new RtuClient(fakePort([frameWithCrc([2, 3, 2, 0, 7])]));
+  await client.open({ baudRate: 9600 });
+  await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 0, count: 1, timeoutMs: 1000 }), /Unit ID/);
+});
+
+test('refuses a second read while one is in flight', async () => {
+  const client = new RtuClient(fakePort([]));
+  await client.open({ baudRate: 9600 });
+  const first = client.read({ unitId: 1, functionCode: 3, address: 0, count: 1, timeoutMs: 200 });
+  await assert.rejects(client.read({ unitId: 1, functionCode: 3, address: 1, count: 1, timeoutMs: 200 }), /ยังไม่เสร็จ/);
+  await assert.rejects(first, /timeout/i);
+});
+
+test('an abort signal cancels a pending read promptly', async () => {
+  const client = new RtuClient(fakePort([]));
+  await client.open({ baudRate: 9600 });
+  const controller = new AbortController();
+  const started = Date.now();
+  const pending = client.read({ unitId: 1, functionCode: 3, address: 0, count: 1, timeoutMs: 5000, signal: controller.signal });
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(pending, error => error.kind === 'cancelled');
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(client.busy, false);
+});
+
+test('rejects unit ID 0 because broadcast reads get no reply', async () => {
+  const client = new RtuClient(fakePort([]));
+  await client.open({ baudRate: 9600 });
+  await assert.rejects(client.read({ unitId: 0, functionCode: 3, address: 0, count: 1 }), error => error.kind === 'input');
+});

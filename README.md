@@ -40,7 +40,7 @@ npm start
 - ค่าสดที่ address ติดกันและประเภทเดียวกันจะอ่านรวมในคำขอเดียว หากอุปกรณ์ปฏิเสธจะกลับไปอ่านทีละ address
 - ประวัติค่าสดบันทึกเป็นชุด และลบข้อมูลที่เก่ากว่า 30 วันอัตโนมัติ เปลี่ยนได้ด้วย `LIVE_RETENTION_DAYS=90 npm start` (ใส่ `0` เพื่อเก็บทั้งหมด)
 
-ไฟล์ `.db` อยู่ในเครื่องที่รันเว็บเซิร์ฟเวอร์และไม่ถูกใส่ใน Git สามารถเปิดด้วยโปรแกรม SQLite ทั่วไป หรือใช้ `sqlite3 data/modbus-scan.db` เพื่อดูตาราง `scans`, `scan_results` และ `live_samples` ได้ Node.js 22.13 จะแสดงคำเตือนว่าโมดูล SQLite ในตัว Node ยังเป็น experimental แต่ใช้งานได้โดยไม่ต้องลงแพ็กเกจเพิ่ม
+ไฟล์ `.db` อยู่ในเครื่องที่รันเว็บเซิร์ฟเวอร์และไม่ถูกใส่ใน Git สามารถเปิดด้วยโปรแกรม SQLite ทั่วไป หรือใช้ `sqlite3 data/modbus-scan.db` เพื่อดูตาราง `scans`, `scan_results` และ `live_samples` ได้ แอปใช้โมดูล SQLite ที่มากับ Node ซึ่ง Node 22 ยังติดป้าย experimental อยู่ แต่ใช้งานได้โดยไม่ต้องลงแพ็กเกจเพิ่ม `npm start` และ `npm test` ปิดคำเตือนนี้ไว้แล้ว
 
 ค่า register เป็น unsigned 16-bit ดิบ อุปกรณ์บางรุ่นต้องรวมหลาย register หรือแปลงค่าด้วย scaling/word order ตามคู่มืออุปกรณ์ แอปไม่ได้เดาหน่วยหรือรูปแบบเหล่านั้น การแสดง reference 5 หลักเป็นเพียงตัวช่วย; address หลักที่ส่งจริงคือเลข 0–65535 ในตาราง
 
@@ -92,7 +92,7 @@ Built-in safeguards to keep the load on your device low:
 - Live values with consecutive addresses of the same type are read in one request. If the device rejects that, they are read one by one.
 - Live history is written in batches, and samples older than 30 days are deleted. Change this with `LIVE_RETENTION_DAYS=90 npm start` (`0` keeps everything).
 
-The `.db` file stays on the computer that runs the server and is not committed to Git. Open it with any SQLite tool, for example `sqlite3 data/modbus-scan.db`, to see the `scans`, `scan_results` and `live_samples` tables. Node.js 22 prints a warning that its built-in SQLite module is experimental; it works without extra packages.
+The `.db` file stays on the computer that runs the server and is not committed to Git. Open it with any SQLite tool, for example `sqlite3 data/modbus-scan.db`, to see the `scans`, `scan_results` and `live_samples` tables. The app uses Node's built-in SQLite module, which Node 22 still marks as experimental; it works without extra packages, and `npm start` and `npm test` hide that warning.
 
 Register values are shown as raw unsigned 16-bit numbers. Some devices combine several registers or need scaling or a particular word order; check your device manual, because the app does not guess units or formats. The 5-digit reference (such as `40001`) is only a convenience; the address actually sent is the 0–65535 number in the table.
 
