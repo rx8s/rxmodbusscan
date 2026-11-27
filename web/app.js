@@ -1,4 +1,4 @@
-import { AREAS, referenceLabel, scan } from './scan.js';
+import { AREAS, FAST_MIN_BLOCK, MAX_CONSECUTIVE_FAILURES, referenceLabel, scan } from './scan.js';
 import { createLivePoller } from './live.js';
 import { RtuClient } from './rtu.js';
 
@@ -7,7 +7,7 @@ const all = selector => [...document.querySelectorAll(selector)];
 const state = {
   transport: 'tcp', serial: null, snapshot: new Map(), selected: new Set(), failures: [],
   summary: null, scanning: false, controller: null, poller: null, liveValues: new Map(),
-  liveCells: new Map(), context: null, scanId: null, selectionWrites: Promise.resolve(), liveWrites: Promise.resolve(), saveErrorShown: false, page: 1, renderTimer: null
+  liveCells: new Map(), context: null, scanId: null, selectionWrites: Promise.resolve(), liveWrites: Promise.resolve(), liveBuffer: [], liveBufferScanId: null, liveFlushTimer: null, saveErrorShown: false, page: 1, renderTimer: null
 };
 const keyOf = row => `${row.functionCode}:${row.address}`;
 const areaName = code => AREAS.find(area => area.functionCode === code)?.name || `FC${code}`;
@@ -71,7 +71,7 @@ function getSettings() {
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > 65535 || start > end) throw new Error('ช่วง address ต้องอยู่ระหว่าง 0–65535 และเริ่มต้นไม่เกินสิ้นสุด');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) throw new Error('Timeout ต้องอยู่ระหว่าง 100–30000 ms');
   if (!Number.isInteger(unitId) || unitId < (state.transport === 'tcp' ? 0 : 1) || unitId > 247) throw new Error('Unit ID ไม่ถูกต้อง');
-  const common = { transport: state.transport, start, end, areas, timeoutMs, unitId };
+  const common = { transport: state.transport, start, end, areas, timeoutMs, unitId, minBlock: $('fast-scan').checked ? FAST_MIN_BLOCK : 1 };
   if (state.transport === 'tcp') {
     const host = $('host').value.trim();
     const port = Number($('port').value);
@@ -88,8 +88,17 @@ function updateEstimate() {
   const start = allMode ? 0 : Number($('start').value);
   const end = allMode ? 65535 : Number($('end').value);
   const addresses = Number.isInteger(start) && Number.isInteger(end) && end >= start ? end - start + 1 : 0;
-  const minimum = areas.reduce((sum, area) => sum + Math.ceil(addresses / (area <= 2 ? 256 : 64)), 0);
-  $('scan-estimate').textContent = `${fmt(addresses * areas.length)} จุด · อย่างน้อยประมาณ ${fmt(minimum)} คำขอ${allMode ? ' · การสแกนทั้งหมดอาจใช้เวลานานมาก' : ''}`;
+  const minBlock = $('fast-scan').checked ? FAST_MIN_BLOCK : 1;
+  let minimum = 0;
+  let maximum = 0;
+  for (const area of areas) {
+    const size = Math.min(addresses, area <= 2 ? 256 : 64);
+    const chunks = size ? Math.ceil(addresses / size) : 0;
+    minimum += chunks;
+    // Worst case: every block answers "illegal address" and is halved down to minBlock.
+    maximum += chunks * Math.max(1, 2 * Math.ceil(size / minBlock) - 1);
+  }
+  $('scan-estimate').textContent = `${fmt(addresses * areas.length)} จุด · ประมาณ ${fmt(minimum)}–${fmt(maximum)} คำขอ${allMode ? ' · การสแกนทั้งหมดอาจใช้เวลานานมาก' : ''}`;
 }
 
 function saveSettings() {
@@ -98,6 +107,7 @@ function saveSettings() {
   values.transport = state.transport;
   values.rangeMode = document.querySelector('input[name="range-mode"]:checked')?.value;
   values.areas = all('input[name="area"]:checked').map(node => node.value);
+  values.fastScan = $('fast-scan').checked;
   localStorage.setItem('modbus-settings-v1', JSON.stringify(values));
 }
 
@@ -107,6 +117,7 @@ function restoreSettings() {
     if (!values) return;
     for (const [id, value] of Object.entries(values)) if ($(id) && typeof value === 'string') $(id).value = value;
     if (values.rangeMode) document.querySelector(`input[name="range-mode"][value="${values.rangeMode}"]`)?.click();
+    $('fast-scan').checked = values.fastScan === true;
     if (Array.isArray(values.areas)) all('input[name="area"]').forEach(node => { node.checked = values.areas.includes(node.value); });
     if (values.transport === 'rtu') setTransport('rtu');
   } catch { /* damaged local preferences are ignored */ }
@@ -141,13 +152,36 @@ function saveSelection() {
   return state.selectionWrites;
 }
 
+const LIVE_BATCH_SIZE = 200;
+const LIVE_FLUSH_MS = 1000;
+
+// Live samples are buffered and written in batches so SQLite commits once per batch, not per value.
 function saveLiveSample(row) {
   if (!state.scanId) return;
-  const scanId = state.scanId;
-  state.liveWrites = state.liveWrites.then(async () => {
-    const response = await fetch(`/api/scans/${scanId}/live`, { method: 'POST', headers: { 'content-type': 'application/json' }, keepalive: true, body: JSON.stringify(row) });
+  if (state.liveBufferScanId !== state.scanId) flushLiveSamples();
+  state.liveBufferScanId = state.scanId;
+  const sample = { functionCode: row.functionCode, address: row.address, status: row.status, time: row.time };
+  if (row.status === 'ok') sample.value = row.value;
+  if (row.message) sample.message = String(row.message).slice(0, 1000);
+  state.liveBuffer.push(sample);
+  if (state.liveBuffer.length >= LIVE_BATCH_SIZE) flushLiveSamples();
+  else state.liveFlushTimer ??= setTimeout(flushLiveSamples, LIVE_FLUSH_MS);
+}
+
+function flushLiveSamples(unloading = false) {
+  clearTimeout(state.liveFlushTimer);
+  state.liveFlushTimer = null;
+  if (!state.liveBuffer.length) return state.liveWrites;
+  const scanId = state.liveBufferScanId;
+  const samples = state.liveBuffer;
+  state.liveBuffer = [];
+  const send = async () => {
+    // keepalive lets the last batch survive page unload, but caps the body at 64 KB, so use it only then.
+    const response = await fetch(`/api/scans/${scanId}/live`, { method: 'POST', headers: { 'content-type': 'application/json' }, keepalive: unloading, body: JSON.stringify({ samples }) });
     if (!response.ok) throw new Error('บันทึกประวัติค่าสดไม่สำเร็จ');
-  }).catch(error => { if (!state.saveErrorShown) toast(error.message); state.saveErrorShown = true; });
+  };
+  state.liveWrites = (unloading ? send() : state.liveWrites.then(send)).catch(error => { if (!state.saveErrorShown) toast(error.message); state.saveErrorShown = true; });
+  return state.liveWrites;
 }
 
 async function loadLegacySnapshot() {
@@ -342,7 +376,7 @@ async function startScan() {
   status('กำลังสแกน'); renderAll(); saveSettings();
   let disconnectSerial = false;
   try {
-    const summary = await scan({ read, areas: settings.areas, start: settings.start, end: settings.end, signal: state.controller.signal,
+    const summary = await scan({ read, areas: settings.areas, start: settings.start, end: settings.end, minBlock: settings.minBlock, signal: state.controller.signal,
       onProgress: updateProgress,
       onResult: result => { if (result.status === 'ok') state.snapshot.set(keyOf(result), result); else if (state.failures.length < 500) state.failures.push(result); scheduleRender(); }
     });
@@ -350,6 +384,7 @@ async function startScan() {
     disconnectSerial = settings.transport === 'rtu' && (summary.cancelled || summary.stopped);
     $('progress-label').textContent = summary.cancelled ? 'หยุดสแกนแล้ว' : summary.stopped ? 'หยุดเพราะการเชื่อมต่อผิดพลาด' : 'สแกนเสร็จ';
     status(summary.cancelled ? 'หยุดสแกนแล้ว' : summary.stopped ? 'การเชื่อมต่อผิดพลาด' : 'สแกนเสร็จ', summary.stopped);
+    if (summary.stopped && !summary.cancelled) toast(`หยุดสแกนเพราะสื่อสารกับอุปกรณ์ไม่สำเร็จ (ผิดพลาดติดกันสูงสุด ${MAX_CONSECUTIVE_FAILURES} ครั้ง) · ตรวจสอบ IP/Port หรือการตั้งค่า Serial`);
     await saveSnapshot();
   } catch (error) { disconnectSerial = settings.transport === 'rtu'; status('สแกนผิดพลาด', true); toast(error.message); }
   finally {
@@ -384,7 +419,7 @@ function startLive() {
 
 async function stopLive() {
   $('stop-live').disabled = true;
-  try { await state.poller?.stop(); await state.liveWrites; } finally { $('stop-live').disabled = false; }
+  try { await state.poller?.stop(); await flushLiveSamples(); } finally { $('stop-live').disabled = false; }
   if (state.context?.transport === 'rtu' && state.serial?.desynced) await closeSerial('ต้องเลือกพอร์ตใหม่');
   $('start-live').classList.remove('hidden'); $('stop-live').classList.add('hidden');
   status('หยุดค่าสดแล้ว'); renderLive();
@@ -432,7 +467,7 @@ $('prev-page').onclick = () => { state.page--; renderSnapshot(); };
 $('next-page').onclick = () => { state.page++; renderSnapshot(); };
 $('search').oninput = () => { state.page = 1; scheduleRender(); };
 $('area-filter').onchange = () => { state.page = 1; renderSnapshot(); };
-all('input[name="range-mode"],input[name="area"],#start,#end').forEach(node => node.addEventListener('change', () => { updateEstimate(); saveSettings(); }));
+all('input[name="range-mode"],input[name="area"],#start,#end,#fast-scan').forEach(node => node.addEventListener('change', () => { updateEstimate(); saveSettings(); }));
 function refreshFormErrors() {
   if ($('connection-error').classList.contains('hidden') && $('range-error').classList.contains('hidden')) return;
   try { getSettings(); clearFormErrors(); } catch { /* keep the error until all settings are valid */ }
@@ -444,5 +479,5 @@ all('input,select').forEach(node => {
 all('#baud,#data-bits,#stop-bits,#parity').forEach(node => node.addEventListener('change', async () => {
   if (state.serial && !state.scanning && !state.poller?.running) { await state.serial.close(); state.serial = null; $('choose-port').textContent = 'เลือกพอร์ต USB / Serial'; $('serial-status').textContent = 'ตั้งค่า Serial เปลี่ยนแล้ว · เลือกพอร์ตอีกครั้ง'; }
 }));
-window.addEventListener('beforeunload', () => { state.poller?.stop(); state.controller?.abort(); });
+window.addEventListener('beforeunload', () => { state.poller?.stop(); state.controller?.abort(); flushLiveSamples(true); });
 restoreSettings(); updateEstimate(); renderAll(); restoreSnapshot();

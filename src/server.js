@@ -42,6 +42,10 @@ function validateScan(body) {
   body.rows.forEach(row => validateResult(row));
   body.failures.forEach(row => validateResult(row, true));
 }
+function validateLive(row) {
+  if (!row || !integer(row.functionCode, 1, 4) || !integer(row.address, 0, 65535) || !['ok', 'failed'].includes(row.status) || !integer(row.time, 0, Number.MAX_SAFE_INTEGER) || (row.value != null && !integer(row.value, 0, row.functionCode <= 2 ? 1 : 65535)) || (row.message != null && (typeof row.message !== 'string' || row.message.length > 1000))) invalid('ค่าสดไม่ถูกต้อง');
+}
+export const MAX_LIVE_BATCH = 1000;
 async function readJson(req, limit) {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') invalid('ต้องส่ง JSON');
   let size = 0;
@@ -52,7 +56,7 @@ async function readJson(req, limit) {
 
 export function createAppServer({ read = readTcp, store = null } = {}) {
   const storage = () => { store ??= createStore(); return store; };
-  return http.createServer(async (req, res) => {
+  const handle = async (req, res) => {
     const host = req.headers.host || '';
     const hostname = host.replace(/:\d+$/, '').toLowerCase();
     if (!['localhost', '127.0.0.1'].includes(hostname)) return json(res, 403, { error: 'Localhost only' });
@@ -73,8 +77,11 @@ export function createAppServer({ read = readTcp, store = null } = {}) {
         const body = await readJson(req, 1024 * 1024);
         if (scanRoute[2] === 'selection' && req.method === 'PUT') { validateSelection(body?.selected); storage().setSelection(id, body.selected); return json(res, 200, { saved: true }); }
         if (scanRoute[2] === 'live' && req.method === 'POST') {
-          if (!body || !integer(body.functionCode, 1, 4) || !integer(body.address, 0, 65535) || !['ok', 'failed'].includes(body.status) || !integer(body.time, 0, Number.MAX_SAFE_INTEGER) || (body.value != null && !integer(body.value, 0, body.functionCode <= 2 ? 1 : 65535)) || (body.message != null && (typeof body.message !== 'string' || body.message.length > 1000))) invalid('ค่าสดไม่ถูกต้อง');
-          storage().saveLive(id, body); return json(res, 201, { saved: true });
+          // Accepts one sample or { samples: [...] } so the browser can batch writes.
+          const samples = Array.isArray(body?.samples) ? body.samples : [body];
+          if (!samples.length || samples.length > MAX_LIVE_BATCH) invalid('จำนวนค่าสดไม่ถูกต้อง');
+          samples.forEach(validateLive);
+          storage().saveLiveBatch(id, samples); return json(res, 201, { saved: samples.length });
         }
         return json(res, 405, { error: 'Method not allowed' });
       } catch (error) { return json(res, error.kind === 'input' ? 400 : 500, { error: error.message }); }
@@ -107,6 +114,12 @@ export function createAppServer({ read = readTcp, store = null } = {}) {
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       res.end(data);
     } catch { json(res, 500, { error: 'Asset unavailable' }); }
+  };
+  return http.createServer((req, res) => {
+    handle(req, res).catch(error => {
+      if (res.headersSent) res.destroy(error);
+      else json(res, 500, { error: error?.message || 'Internal server error' });
+    });
   });
 }
 

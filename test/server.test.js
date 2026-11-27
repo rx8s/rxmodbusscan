@@ -55,3 +55,13 @@ test('returns 400 for a malformed request target without throwing', () => {
   assert.equal(status, 400);
   server.close();
 });
+
+test('returns 500 instead of crashing when storage throws', async () => {
+  const server = createAppServer({ store: { latestScan() { throw new Error('database is locked'); } } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/scans/latest`);
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: 'database is locked' });
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});

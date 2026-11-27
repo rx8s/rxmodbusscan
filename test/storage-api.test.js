@@ -35,3 +35,21 @@ test('rejects malformed scan rows without writing a scan', async () => {
     assert.equal(store.latestScan(), null);
   } finally { await new Promise(resolve => server.close(resolve)); store.close(); }
 });
+
+test('accepts a batch of live samples and rejects the whole batch if one is invalid', async () => {
+  const store = createStore(':memory:');
+  const server = createAppServer({ store });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = body => fetch(`${base}/api/scans/${id}/live`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const id = store.saveScan({ context: { transport: 'rtu' }, summary: {}, rows: [], failures: [], selected: [] });
+  try {
+    const ok = await post({ samples: [{ functionCode: 3, address: 7, value: 1, status: 'ok', time: 1 }, { functionCode: 3, address: 8, status: 'failed', time: 2, message: 'timeout' }] });
+    assert.equal(ok.status, 201);
+    assert.deepEqual(await ok.json(), { saved: 2 });
+    const bad = await post({ samples: [{ functionCode: 3, address: 7, value: 1, status: 'ok', time: 3 }, { functionCode: 9, address: 7, status: 'ok', time: 3 }] });
+    assert.equal(bad.status, 400);
+    assert.equal((await post({ samples: [] })).status, 400);
+    assert.equal(store.getLive(id).length, 2);
+  } finally { await new Promise(resolve => server.close(resolve)); store.close(); }
+});
