@@ -52,7 +52,7 @@ async function readJson(req, limit) {
 
 export function createAppServer({ read = readTcp, store = null } = {}) {
   const storage = () => { store ??= createStore(); return store; };
-  return http.createServer(async (req, res) => {
+  const handle = async (req, res) => {
     const host = req.headers.host || '';
     const hostname = host.replace(/:\d+$/, '').toLowerCase();
     if (!['localhost', '127.0.0.1'].includes(hostname)) return json(res, 403, { error: 'Localhost only' });
@@ -107,6 +107,12 @@ export function createAppServer({ read = readTcp, store = null } = {}) {
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       res.end(data);
     } catch { json(res, 500, { error: 'Asset unavailable' }); }
+  };
+  return http.createServer((req, res) => {
+    handle(req, res).catch(error => {
+      if (res.headersSent) res.destroy(error);
+      else json(res, 500, { error: error?.message || 'Internal server error' });
+    });
   });
 }
 

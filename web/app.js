@@ -1,4 +1,4 @@
-import { AREAS, referenceLabel, scan } from './scan.js';
+import { AREAS, FAST_MIN_BLOCK, MAX_CONSECUTIVE_FAILURES, referenceLabel, scan } from './scan.js';
 import { createLivePoller } from './live.js';
 import { RtuClient } from './rtu.js';
 
@@ -71,7 +71,7 @@ function getSettings() {
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > 65535 || start > end) throw new Error('ช่วง address ต้องอยู่ระหว่าง 0–65535 และเริ่มต้นไม่เกินสิ้นสุด');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) throw new Error('Timeout ต้องอยู่ระหว่าง 100–30000 ms');
   if (!Number.isInteger(unitId) || unitId < (state.transport === 'tcp' ? 0 : 1) || unitId > 247) throw new Error('Unit ID ไม่ถูกต้อง');
-  const common = { transport: state.transport, start, end, areas, timeoutMs, unitId };
+  const common = { transport: state.transport, start, end, areas, timeoutMs, unitId, minBlock: $('fast-scan').checked ? FAST_MIN_BLOCK : 1 };
   if (state.transport === 'tcp') {
     const host = $('host').value.trim();
     const port = Number($('port').value);
@@ -88,8 +88,17 @@ function updateEstimate() {
   const start = allMode ? 0 : Number($('start').value);
   const end = allMode ? 65535 : Number($('end').value);
   const addresses = Number.isInteger(start) && Number.isInteger(end) && end >= start ? end - start + 1 : 0;
-  const minimum = areas.reduce((sum, area) => sum + Math.ceil(addresses / (area <= 2 ? 256 : 64)), 0);
-  $('scan-estimate').textContent = `${fmt(addresses * areas.length)} จุด · อย่างน้อยประมาณ ${fmt(minimum)} คำขอ${allMode ? ' · การสแกนทั้งหมดอาจใช้เวลานานมาก' : ''}`;
+  const minBlock = $('fast-scan').checked ? FAST_MIN_BLOCK : 1;
+  let minimum = 0;
+  let maximum = 0;
+  for (const area of areas) {
+    const size = Math.min(addresses, area <= 2 ? 256 : 64);
+    const chunks = size ? Math.ceil(addresses / size) : 0;
+    minimum += chunks;
+    // Worst case: every block answers "illegal address" and is halved down to minBlock.
+    maximum += chunks * Math.max(1, 2 * Math.ceil(size / minBlock) - 1);
+  }
+  $('scan-estimate').textContent = `${fmt(addresses * areas.length)} จุด · ประมาณ ${fmt(minimum)}–${fmt(maximum)} คำขอ${allMode ? ' · การสแกนทั้งหมดอาจใช้เวลานานมาก' : ''}`;
 }
 
 function saveSettings() {
@@ -98,6 +107,7 @@ function saveSettings() {
   values.transport = state.transport;
   values.rangeMode = document.querySelector('input[name="range-mode"]:checked')?.value;
   values.areas = all('input[name="area"]:checked').map(node => node.value);
+  values.fastScan = $('fast-scan').checked;
   localStorage.setItem('modbus-settings-v1', JSON.stringify(values));
 }
 
@@ -107,6 +117,7 @@ function restoreSettings() {
     if (!values) return;
     for (const [id, value] of Object.entries(values)) if ($(id) && typeof value === 'string') $(id).value = value;
     if (values.rangeMode) document.querySelector(`input[name="range-mode"][value="${values.rangeMode}"]`)?.click();
+    $('fast-scan').checked = values.fastScan === true;
     if (Array.isArray(values.areas)) all('input[name="area"]').forEach(node => { node.checked = values.areas.includes(node.value); });
     if (values.transport === 'rtu') setTransport('rtu');
   } catch { /* damaged local preferences are ignored */ }
@@ -342,7 +353,7 @@ async function startScan() {
   status('กำลังสแกน'); renderAll(); saveSettings();
   let disconnectSerial = false;
   try {
-    const summary = await scan({ read, areas: settings.areas, start: settings.start, end: settings.end, signal: state.controller.signal,
+    const summary = await scan({ read, areas: settings.areas, start: settings.start, end: settings.end, minBlock: settings.minBlock, signal: state.controller.signal,
       onProgress: updateProgress,
       onResult: result => { if (result.status === 'ok') state.snapshot.set(keyOf(result), result); else if (state.failures.length < 500) state.failures.push(result); scheduleRender(); }
     });
@@ -350,6 +361,7 @@ async function startScan() {
     disconnectSerial = settings.transport === 'rtu' && (summary.cancelled || summary.stopped);
     $('progress-label').textContent = summary.cancelled ? 'หยุดสแกนแล้ว' : summary.stopped ? 'หยุดเพราะการเชื่อมต่อผิดพลาด' : 'สแกนเสร็จ';
     status(summary.cancelled ? 'หยุดสแกนแล้ว' : summary.stopped ? 'การเชื่อมต่อผิดพลาด' : 'สแกนเสร็จ', summary.stopped);
+    if (summary.stopped && !summary.cancelled) toast(`หยุดสแกนเพราะสื่อสารกับอุปกรณ์ไม่สำเร็จ (ผิดพลาดติดกันสูงสุด ${MAX_CONSECUTIVE_FAILURES} ครั้ง) · ตรวจสอบ IP/Port หรือการตั้งค่า Serial`);
     await saveSnapshot();
   } catch (error) { disconnectSerial = settings.transport === 'rtu'; status('สแกนผิดพลาด', true); toast(error.message); }
   finally {
@@ -432,7 +444,7 @@ $('prev-page').onclick = () => { state.page--; renderSnapshot(); };
 $('next-page').onclick = () => { state.page++; renderSnapshot(); };
 $('search').oninput = () => { state.page = 1; scheduleRender(); };
 $('area-filter').onchange = () => { state.page = 1; renderSnapshot(); };
-all('input[name="range-mode"],input[name="area"],#start,#end').forEach(node => node.addEventListener('change', () => { updateEstimate(); saveSettings(); }));
+all('input[name="range-mode"],input[name="area"],#start,#end,#fast-scan').forEach(node => node.addEventListener('change', () => { updateEstimate(); saveSettings(); }));
 function refreshFormErrors() {
   if ($('connection-error').classList.contains('hidden') && $('range-error').classList.contains('hidden')) return;
   try { getSettings(); clearFormErrors(); } catch { /* keep the error until all settings are valid */ }

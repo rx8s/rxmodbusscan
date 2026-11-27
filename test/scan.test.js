@@ -62,3 +62,36 @@ test('uses 0–65535 for full scan mode', async () => {
   assert.deepEqual(requests.at(-1), [65500, 36]);
   assert.equal(requests.length, 525);
 });
+
+test('fast mode stops halving illegal-address blocks at minBlock', async () => {
+  const invalid = () => { throw { kind: 'exception', exceptionCode: 2 }; };
+  const precise = await scan({ read: async () => invalid(), areas: [3], start: 0, end: 63, chunkSize: 64 });
+  const fast = await scan({ read: async () => invalid(), areas: [3], start: 0, end: 63, chunkSize: 64, minBlock: 8 });
+  assert.equal(precise.requests, 127);
+  assert.equal(fast.requests, 15);
+  assert.equal(fast.invalid, 64);
+  assert.equal(fast.processed, 64);
+});
+
+test('stops after consecutive communication failures', async () => {
+  let calls = 0;
+  const summary = await scan({ read: async () => { calls++; throw Object.assign(new Error('TCP timeout'), { kind: 'transport' }); }, areas: [3, 4], start: 0, end: 65535, maxConsecutiveFailures: 5 });
+  assert.equal(calls, 5);
+  assert.equal(summary.stopped, true);
+  assert.equal(summary.failed, 5 * 64);
+});
+
+test('a successful read or Modbus exception resets the failure streak', async () => {
+  let calls = 0;
+  const summary = await scan({
+    read: async ({ count }) => {
+      calls++;
+      if (calls % 3 === 0) return Array(count).fill(1);
+      if (calls % 3 === 1) throw Object.assign(new Error('TCP timeout'), { kind: 'transport' });
+      throw { kind: 'exception', exceptionCode: 2 };
+    },
+    areas: [3], start: 0, end: 99, chunkSize: 1, maxConsecutiveFailures: 2
+  });
+  assert.equal(summary.stopped, false);
+  assert.equal(summary.processed, 100);
+});
